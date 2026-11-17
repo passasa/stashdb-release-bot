@@ -1,7 +1,7 @@
 // Bot Discord — suivi des nouvelles sorties StashDB.
 //
 // Annonce dans un ou plusieurs salons NSFW les nouvelles scènes publiées par
-// les studios mis en favori sur le compte StashDB. Une seule commande,
+// les studios et interprètes mis en favori sur le compte StashDB. Une seule commande,
 // /sorties, réservée aux gestionnaires du serveur.
 // Logique : releases.js (règles pures) et tracker.js (base + tour).
 
@@ -29,7 +29,8 @@ const STASH_API_KEY = process.env.STASH_API_KEY || '';
 const POLL_MS = parsePollInterval(process.env.POLL_STASHDB_MS);
 const MAX_AGE_DAYS = parseMaxAgeDays(process.env.RELEASES_MAX_AGE_DAYS);
 const TIMEZONE = process.env.BOT_TIMEZONE || DEFAULT_TIMEZONE;
-const SCENES_PER_STUDIO = 25;
+const SCENES_PER_FOLLOW = 25;
+const FOLLOW_PERFORMERS = !/^(0|false|non|no)$/i.test(process.env.FOLLOW_PERFORMERS || '');
 const MAX_PER_ROUND = 20;
 const ALLOWED_GUILDS = (process.env.ALLOWED_GUILDS || '').split(',').map((s) => s.trim()).filter(Boolean);
 // Répertoire de données : ./data par défaut, le volume /data en Docker.
@@ -79,35 +80,47 @@ async function stashGraphQL(query, variables = {}) {
   throw new Error(`StashDB : ${lastError.message}`);
 }
 
-/** Studios favoris du compte StashDB. Lève en cas d'échec (jamais de liste vide « par défaut »). */
-async function fetchFavoriteStudios() {
-  const query = `query FavoriteStudios($input: StudioQueryInput!) {
-    queryStudios(input: $input) { count studios { id name } }
-  }`;
+const SCENE_FIELDS = `
+  id title release_date duration
+  studio { id name }
+  performers { performer { name } }
+  images { url }
+`;
+
+/** Lit toutes les pages d'une liste de favoris. Lève en cas d'échec (jamais de liste vide « par défaut »). */
+async function fetchFavoritePages(query, field, listField) {
   const all = [];
   for (let page = 1; page <= 20; page++) {
     const data = await stashGraphQL(query, { input: { is_favorite: true, per_page: 100, page } });
-    const result = data.queryStudios;
-    if (!result || !Array.isArray(result.studios)) throw new Error('favoris StashDB illisibles');
-    all.push(...result.studios);
-    if (result.studios.length < 100 || all.length >= (result.count || 0)) break;
+    const result = data[field];
+    if (!result || !Array.isArray(result[listField])) throw new Error('favoris StashDB illisibles');
+    all.push(...result[listField]);
+    if (result[listField].length < 100 || all.length >= (result.count || 0)) break;
   }
   return all;
 }
 
-async function fetchStudioScenes(studio) {
-  const query = `query StudioScenes($input: SceneQueryInput!) {
-    queryScenes(input: $input) {
-      scenes {
-        id title release_date duration
-        studio { id name }
-        performers { performer { name } }
-        images { url }
-      }
-    }
-  }`;
-  const data = await stashGraphQL(query, {
-    input: { studios: { value: [studio.id], modifier: 'INCLUDES' }, sort: 'DATE', direction: 'DESC', per_page: SCENES_PER_STUDIO, page: 1 },
+/** Studios (et interprètes, sauf FOLLOW_PERFORMERS=false) favoris du compte StashDB. */
+async function fetchFollows() {
+  const studios = await fetchFavoritePages(`query FavoriteStudios($input: StudioQueryInput!) {
+    queryStudios(input: $input) { count studios { id name } }
+  }`, 'queryStudios', 'studios');
+  const performers = FOLLOW_PERFORMERS ? await fetchFavoritePages(`query FavoritePerformers($input: PerformerQueryInput!) {
+    queryPerformers(input: $input) { count performers { id name } }
+  }`, 'queryPerformers', 'performers') : [];
+  return [
+    ...studios.map((s) => ({ kind: 'studio', id: s.id, name: s.name })),
+    ...performers.map((p) => ({ kind: 'performer', id: p.id, name: p.name })),
+  ];
+}
+
+/** Dernières scènes d'un studio ou d'un interprète suivi. */
+async function fetchScenes(follow) {
+  const filter = follow.kind === 'performer' ? 'performers' : 'studios';
+  const data = await stashGraphQL(`query FollowScenes($input: SceneQueryInput!) {
+    queryScenes(input: $input) { scenes { ${SCENE_FIELDS} } }
+  }`, {
+    input: { [filter]: { value: [follow.id], modifier: 'INCLUDES' }, sort: 'DATE', direction: 'DESC', per_page: SCENES_PER_FOLLOW, page: 1 },
   });
   if (!Array.isArray(data.queryScenes?.scenes)) throw new Error('scènes illisibles');
   return data.queryScenes.scenes;
@@ -141,10 +154,10 @@ async function sendToChannel(row, embed) {
   return false;
 }
 
-async function deliver(scene) {
+async function deliver(scene, via = []) {
   const channels = store.activeChannels();
   if (channels.length === 0) return { channels: 0, sent: 0 };
-  const embed = buildReleaseEmbed(scene, STASH_ENDPOINT);
+  const embed = buildReleaseEmbed(scene, STASH_ENDPOINT, via);
   let sent = 0;
   for (const row of channels) {
     if (await sendToChannel(row, embed)) sent++;
@@ -165,14 +178,14 @@ function check() {
     console.log(`[${started.toLocaleString('fr-FR', { timeZone: TIMEZONE })}] Vérification des sorties StashDB…`);
     try {
       const summary = await runRound({
-        store, fetchFavoriteStudios, fetchStudioScenes, deliver,
+        store, fetchFollows, fetchScenes, deliver,
         today: todayIn(TIMEZONE), maxAgeDays: MAX_AGE_DAYS, maxPerRound: MAX_PER_ROUND,
         pauseMs: 300, log: console.log,
       });
       store.kvSet('last_round_at', started.toISOString());
       store.kvSet('last_round_summary', JSON.stringify(summary));
       store.kvSet('last_round_error', '');
-      console.log(`  → ${summary.studios} studio(s), ${summary.sent} annoncée(s), ${summary.seeded} amorcée(s)`
+      console.log(`  → ${summary.studios} studio(s), ${summary.performers} interprète(s), ${summary.sent} annoncée(s), ${summary.seeded} amorcée(s)`
         + `${summary.waiting ? `, ${summary.waiting} en attente` : ''}${summary.deferred ? `, ${summary.deferred} reportée(s)` : ''}`);
       return summary;
     } catch (err) {
@@ -208,7 +221,7 @@ const command = new SlashCommandBuilder()
       .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)))
   .addSubcommand((s) => s.setName('retirer-salon').setDescription('Ne plus annoncer dans ce salon')
     .addChannelOption((o) => o.setName('canal').setDescription('Salon').setRequired(true)))
-  .addSubcommand((s) => s.setName('studios').setDescription('Studios suivis (favoris StashDB)'))
+  .addSubcommand((s) => s.setName('suivis').setDescription('Studios et interprètes suivis (favoris StashDB)'))
   .addSubcommand((s) => s.setName('dernieres').setDescription('Dernières sorties annoncées'))
   .addSubcommand((s) => s.setName('etat').setDescription('État du suivi'))
   .addSubcommand((s) => s.setName('verifier').setDescription('Vérifier les sorties maintenant'));
@@ -228,9 +241,9 @@ const ephemeral = (content) => ({ content, flags: MessageFlags.Ephemeral, allowe
 
 function describeSummary(s) {
   if (!s) return 'aucun tour terminé';
-  const parts = [`${s.studios} studio(s) vérifié(s)`, `${s.sent} sortie(s) annoncée(s)`];
+  const parts = [`${s.studios} studio(s) et ${s.performers ?? 0} interprète(s) vérifiés`, `${s.sent} sortie(s) annoncée(s)`];
   if (s.seeded) parts.push(`${s.seeded} amorcée(s) sans annonce`);
-  if (s.failures) parts.push(`⚠ ${s.failures} studio(s) en erreur`);
+  if (s.failures) parts.push(`⚠ ${s.failures} suivi(s) en erreur`);
   if (s.noChannel) parts.push(`⚠ ${s.waiting} en attente d'un salon`);
   else if (s.waiting) parts.push(`⚠ ${s.waiting} à retenter`);
   if (s.deferred) parts.push(`${s.deferred} reportée(s) au tour suivant`);
@@ -259,12 +272,20 @@ async function handleSorties(interaction) {
     return interaction.reply(ephemeral(removed ? `✓ ${channel} ne recevra plus les sorties.` : `${channel} n'était pas configuré.`));
   }
 
-  if (sub === 'studios') {
-    const studios = store.activeStudios();
-    if (studios.length === 0) return interaction.reply(ephemeral('Aucun studio suivi. Ajoutez des studios en favori sur votre compte StashDB, puis `/sorties verifier`.'));
-    const lines = studios.map((s) => `• ${escapeMarkdown(s.name)}${s.last_error ? ' ⚠' : ''}`);
-    let text = `**${studios.length} studio(s) suivi(s)** (favoris StashDB)\n${lines.join('\n')}`;
-    if (studios.some((s) => s.last_error)) text += '\n\n⚠ = erreur au dernier tour, repris au suivant';
+  if (sub === 'suivis') {
+    const follows = store.activeFollows();
+    if (follows.length === 0) {
+      return interaction.reply(ephemeral("Rien n'est suivi. Mettez des studios ou des interprètes en favori sur votre compte StashDB, puis `/sorties verifier`."));
+    }
+    const section = (kind, title) => {
+      const rows = follows.filter((f) => f.kind === kind);
+      if (rows.length === 0) return null;
+      const items = rows.map((f) => '• ' + escapeMarkdown(f.name) + (f.last_error ? ' ⚠' : ''));
+      return '**' + title + ' (' + rows.length + ')**\n' + items.join('\n');
+    };
+    let text = [section('studio', 'Studios'), section('performer', 'Interprètes')].filter(Boolean).join('\n\n');
+    if (follows.some((f) => f.last_error)) text += '\n\n⚠ = erreur au dernier tour, repris au suivant';
+    if (!FOLLOW_PERFORMERS) text += '\n\nSuivi des interprètes désactivé (FOLLOW_PERFORMERS=false).';
     return interaction.reply(ephemeral(truncate(text, 2000)));
   }
 
@@ -289,7 +310,7 @@ async function handleSorties(interaction) {
     const counts = store.counts();
     const lines = [
       `**Salons** : ${channels.length ? channels.map((c) => `<#${c.channel_id}>${c.disabled ? ' (désactivé)' : c.error_count ? ` (⚠ ${c.error_count} échec(s))` : ''}`).join(', ') : 'aucun — `/sorties salon`'}`,
-      `**Studios suivis** : ${store.activeStudios().length}`,
+      `**Suivis** : ${store.activeFollows('studio').length} studio(s), ${store.activeFollows('performer').length} interprète(s)${FOLLOW_PERFORMERS ? '' : ' (interprètes désactivés)'}`,
       `**Sorties annoncées** : ${counts.sent || 0}`,
       `**Dernier tour** : ${lastAt ? discordTime(Date.parse(lastAt)) : 'jamais'}${running ? ' (en cours)' : ''}`,
       lastError ? `⚠ ${truncate(lastError, 300)}` : describeSummary(summary),

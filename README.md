@@ -1,15 +1,18 @@
 # stashdb-release-bot
 
-Bot Discord qui **annonce les nouvelles sorties des studios que vous suivez sur
-[StashDB](https://stashdb.org)**. Mettez un studio en favori sur votre compte
-StashDB : dès qu'une nouvelle scène sort, le bot la publie dans vos salons
-Discord, avec titre, studio, date, durée, interprètes, image et lien.
+Bot Discord qui **annonce les nouvelles sorties des studios et interprètes que
+vous suivez sur [StashDB](https://stashdb.org)**. Mettez un studio ou un
+interprète en favori sur votre compte StashDB : dès qu'une nouvelle scène sort,
+le bot la publie dans vos salons Discord, avec titre, studio, date, durée,
+interprètes, image, lien et la raison de l'annonce (« suivi : … »).
 
 ![Tests](../../actions/workflows/tests.yml/badge.svg)
 
-- **Zéro configuration côté Discord pour suivre un studio** : la liste suivie,
-  ce sont vos favoris StashDB.
-- **Pas d'avalanche** : un studio nouvellement suivi ne déverse pas son
+- **Zéro configuration côté Discord pour suivre** : la liste suivie, ce sont
+  vos favoris StashDB, studios comme interprètes.
+- **Une seule annonce par scène**, même si elle est trouvée par un studio et
+  par un ou plusieurs interprètes suivis.
+- **Pas d'avalanche** : un studio ou interprète nouvellement suivi ne déverse pas son
   historique, seules les sorties suivantes sont annoncées.
 - **Rien n'est perdu** : une scène n'est marquée « annoncée » qu'une fois
   réellement postée ; une panne de StashDB ou de Discord est simplement
@@ -62,7 +65,8 @@ Discord, avec titre, studio, date, durée, interprètes, image et lien.
 
 1. Connectez-vous à StashDB, ouvrez votre **profil** et copiez votre **API key**
    → `STASH_API_KEY`.
-2. Mettez en **favori** (étoile sur la page du studio) chaque studio à suivre.
+2. Mettez en **favori** (étoile sur sa page) chaque studio et chaque
+   interprète à suivre.
 
 ## 3. Installer et lancer
 
@@ -137,12 +141,12 @@ visibles que par vous.
 |---|---|
 | `/sorties salon canal:` | Annonce les nouvelles sorties dans ce salon (NSFW obligatoire). Plusieurs salons possibles. |
 | `/sorties retirer-salon canal:` | N'annonce plus dans ce salon. |
-| `/sorties studios` | Liste des studios suivis (vos favoris StashDB). |
+| `/sorties suivis` | Studios et interprètes suivis (vos favoris StashDB). |
 | `/sorties dernieres` | Les 10 dernières sorties annoncées, avec lien. |
-| `/sorties etat` | Salons, studios, dernier et prochain tour, erreurs éventuelles. |
+| `/sorties etat` | Salons, nombre de suivis, dernier et prochain tour, erreurs éventuelles. |
 | `/sorties verifier` | Lance une vérification immédiatement. |
 
-Pour **suivre** ou **ne plus suivre** un studio, ajoutez-le ou retirez-le de vos
+Pour **suivre** ou **ne plus suivre** un studio ou un interprète, ajoutez-le ou retirez-le de vos
 favoris sur StashDB : la liste se met à jour au tour suivant
 (ou tout de suite avec `/sorties verifier`).
 
@@ -158,6 +162,7 @@ Toutes les options se règlent dans `.env` (voir [`.env.example`](.env.example))
 | `CLIENT_ID` | oui | | ID de l'application Discord |
 | `STASH_API_KEY` | oui | | Clé API du compte StashDB dont les favoris sont suivis |
 | `STASH_ENDPOINT` | | `https://stashdb.org/graphql` | Point GraphQL (une autre instance stash-box fonctionne aussi) ; les liens des annonces en sont déduits |
+| `FOLLOW_PERFORMERS` | | `true` | `false` : ne suivre que les studios, même si des interprètes sont en favori |
 | `POLL_STASHDB_MS` | | `3600000` (1 h) | Intervalle de vérification, 5 min minimum |
 | `RELEASES_MAX_AGE_DAYS` | | `30` | Une scène plus ancienne n'est jamais annoncée |
 | `BOT_TIMEZONE` | | `Europe/Paris` | Fuseau qui décide de « aujourd'hui » |
@@ -171,13 +176,14 @@ Toutes les options se règlent dans `.env` (voir [`.env.example`](.env.example))
 Un tour de vérification a lieu 15 s après le démarrage, puis à chaque
 intervalle (jamais deux tours en même temps) :
 
-1. lecture de vos **studios favoris** sur StashDB ;
-2. pour chacun, lecture de ses **25 dernières scènes** ;
+1. lecture de vos **studios et interprètes favoris** sur StashDB ;
+2. pour chacun, lecture de ses **25 dernières scènes** (les suivis déjà
+   connus d'abord, les nouveaux ensuite) ;
 3. sélection des scènes **sorties** (date ≤ aujourd'hui et de moins de
    `RELEASES_MAX_AGE_DAYS` jours) et **jamais vues** ;
-4. pour un studio **suivi pour la première fois**, ces scènes sont enregistrées
+4. pour un studio ou interprète **suivi pour la première fois**, ces scènes sont enregistrées
    sans être annoncées ;
-5. les autres sont annoncées de la plus ancienne à la plus récente, **20 au
+5. les autres sont annoncées une seule fois chacune de la plus ancienne à la plus récente, **20 au
    plus par tour** (le reste suit au tour d'après), dans tous les salons
    configurés.
 
@@ -187,10 +193,11 @@ intervalle (jamais deux tours en même temps) :
 |---|---|
 | Aucun salon configuré | Les sorties attendent ; elles partent dès qu'un salon est défini. |
 | Envoi impossible partout | La scène est retentée au tour suivant. |
-| Un studio ne répond pas | Ce studio seul est sauté, et repris au tour suivant (⚠ dans `/sorties studios`). |
+| Un studio ou interprète ne répond pas | Ce suivi seul est sauté, et repris au tour suivant (⚠ dans `/sorties suivis`). |
 | StashDB injoignable | Le tour est annulé sans rien modifier. |
+| Interprète ajouté le jour d'une sortie d'un studio déjà suivi | La sortie est bien annoncée (les suivis connus passent avant l'amorçage). |
 | Salon en échec 5 fois de suite | Désactivé ; `/sorties salon` le réactive. |
-| Studio retiré puis remis en favori | Traité comme nouveau : pas de rattrapage massif. |
+| Suivi retiré puis remis en favori | Traité comme nouveau : pas de rattrapage massif. |
 
 ### Sécurité
 
@@ -202,7 +209,7 @@ intervalle (jamais deux tours en même temps) :
 
 ### Données
 
-`bot.db` (SQLite) contient les salons, les studios suivis, les scènes déjà vues
+`bot.db` (SQLite) contient les salons, les studios et interprètes suivis, les scènes déjà vues
 et l'état du dernier tour. Le supprimer revient à repartir de zéro (les
 sorties récentes seront de nouveau amorcées, pas annoncées).
 

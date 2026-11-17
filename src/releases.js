@@ -115,7 +115,8 @@ function safeImage(scene) {
 }
 
 /** Embed Discord (objet APIEmbed) d'une sortie, borné aux limites Discord. */
-function buildReleaseEmbed(scene, endpoint) {
+/** `via` : noms des suivis (studios, interprètes) qui ont fait trouver la scène. */
+function buildReleaseEmbed(scene, endpoint, via = []) {
   const studio = scene.studio?.name || 'Studio inconnu';
   const performers = (scene.performers || [])
     .map((p) => p?.performer?.name || p?.name)
@@ -132,7 +133,7 @@ function buildReleaseEmbed(scene, endpoint) {
     title: truncate(escapeMarkdown(scene.title || 'Sans titre'), 256),
     color: EMBED_COLOR,
     fields,
-    footer: { text: 'Nouvelle sortie' },
+    footer: { text: truncate(via.length ? `Nouvelle sortie · suivi : ${via.join(', ')}` : 'Nouvelle sortie', 2048) },
   };
   const url = sceneUrl(endpoint, scene.id);
   if (url) embed.url = url;

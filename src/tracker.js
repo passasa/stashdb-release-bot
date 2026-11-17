@@ -1,10 +1,11 @@
 // Stockage (bot.db) et tour de vérification du suivi des sorties.
 // La base et les appels StashDB/Discord sont injectés : le module est testé
-// sans réseau ni Discord (test/tracker.test.js).
+// sans réseau ni Discord (test/releases.test.js).
 
 const { selectNewReleases, sortChronologically } = require('./releases');
 
 const MAX_CHANNEL_ERRORS = 5;
+const FOLLOW_KINDS = ['studio', 'performer'];
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS release_channels (
@@ -15,13 +16,16 @@ const SCHEMA = `
     last_error TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   );
-  CREATE TABLE IF NOT EXISTS followed_studios (
-    studio_id TEXT PRIMARY KEY,
+  -- Studios et interprètes suivis (favoris StashDB).
+  CREATE TABLE IF NOT EXISTS follows (
+    kind TEXT NOT NULL CHECK (kind IN ('studio', 'performer')),
+    entity_id TEXT NOT NULL,
     name TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
     seeded INTEGER NOT NULL DEFAULT 0,
     last_checked_at TEXT,
-    last_error TEXT
+    last_error TEXT,
+    PRIMARY KEY (kind, entity_id)
   );
   CREATE TABLE IF NOT EXISTS releases (
     scene_id TEXT PRIMARY KEY,
@@ -39,9 +43,24 @@ const SCHEMA = `
   );
 `;
 
-/** Crée le schéma s'il n'existe pas (idempotent). */
+/**
+ * Crée le schéma (idempotent). Une base de la version 1.0 (table
+ * `followed_studios`) est reprise telle quelle : studios déjà amorcés compris,
+ * donc aucune sortie n'est réannoncée ni perdue.
+ */
 function migrate(db) {
   db.exec(SCHEMA);
+  const legacy = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'followed_studios'").get();
+  if (!legacy) return { migrated: false };
+  const copied = db.transaction(() => {
+    const n = db.prepare(`
+      INSERT OR IGNORE INTO follows (kind, entity_id, name, active, seeded, last_checked_at, last_error)
+      SELECT 'studio', studio_id, name, active, seeded, last_checked_at, last_error FROM followed_studios
+    `).run().changes;
+    db.exec('DROP TABLE followed_studios');
+    return n;
+  })();
+  return { migrated: true, studios: copied };
 }
 
 function createStore(db) {
@@ -63,15 +82,15 @@ function createStore(db) {
       WHERE channel_id = ?
     `),
     channelGet: db.prepare('SELECT * FROM release_channels WHERE channel_id = ?'),
-    studioGet: db.prepare('SELECT * FROM followed_studios WHERE studio_id = ?'),
-    studioUpsert: db.prepare(`
-      INSERT INTO followed_studios (studio_id, name, active, seeded) VALUES (?, ?, 1, 0)
-      ON CONFLICT(studio_id) DO UPDATE SET name = excluded.name, active = 1
+    followGet: db.prepare('SELECT * FROM follows WHERE kind = ? AND entity_id = ?'),
+    followUpsert: db.prepare(`
+      INSERT INTO follows (kind, entity_id, name, active, seeded) VALUES (?, ?, ?, 1, 0)
+      ON CONFLICT(kind, entity_id) DO UPDATE SET name = excluded.name, active = 1
     `),
-    studioDeactivate: db.prepare('UPDATE followed_studios SET active = 0, seeded = 0 WHERE studio_id = ?'),
-    studioSeeded: db.prepare('UPDATE followed_studios SET seeded = 1 WHERE studio_id = ?'),
-    studioChecked: db.prepare("UPDATE followed_studios SET last_checked_at = datetime('now'), last_error = ? WHERE studio_id = ?"),
-    studiosActive: db.prepare('SELECT * FROM followed_studios WHERE active = 1 ORDER BY name COLLATE NOCASE'),
+    followDeactivate: db.prepare('UPDATE follows SET active = 0, seeded = 0 WHERE kind = ? AND entity_id = ?'),
+    followSeeded: db.prepare('UPDATE follows SET seeded = 1 WHERE kind = ? AND entity_id = ?'),
+    followChecked: db.prepare("UPDATE follows SET last_checked_at = datetime('now'), last_error = ? WHERE kind = ? AND entity_id = ?"),
+    followsActive: db.prepare('SELECT * FROM follows WHERE active = 1 ORDER BY kind DESC, name COLLATE NOCASE'),
     knownIds: db.prepare('SELECT scene_id FROM releases'),
     record: db.prepare(`
       INSERT OR IGNORE INTO releases (scene_id, studio_id, studio_name, title, release_date, state)
@@ -104,20 +123,20 @@ function createStore(db) {
     },
 
     /**
-     * Aligne la liste suivie sur les favoris StashDB. Un studio nouveau (ou
-     * retiré puis remis en favori) repart non « amorcé ».
+     * Aligne la liste suivie sur les favoris StashDB ({ kind, id, name }).
+     * Un suivi nouveau (ou retiré puis remis en favori) repart non « amorcé ».
      */
-    syncStudios: db.transaction((studios) => {
-      const present = new Set(studios.map((s) => s.id));
-      for (const row of q.studiosActive.all()) {
-        if (!present.has(row.studio_id)) q.studioDeactivate.run(row.studio_id);
+    syncFollows: db.transaction((follows) => {
+      const present = new Set(follows.map((f) => `${f.kind}:${f.id}`));
+      for (const row of q.followsActive.all()) {
+        if (!present.has(`${row.kind}:${row.entity_id}`)) q.followDeactivate.run(row.kind, row.entity_id);
       }
-      for (const s of studios) q.studioUpsert.run(s.id, s.name || s.id);
+      for (const f of follows) q.followUpsert.run(f.kind, f.id, f.name || f.id);
     }),
-    isSeeded: (studioId) => !!q.studioGet.get(studioId)?.seeded,
-    markSeeded: (studioId) => q.studioSeeded.run(studioId),
-    markChecked: (studioId, error = null) => q.studioChecked.run(error ? String(error).slice(0, 300) : null, studioId),
-    activeStudios: () => q.studiosActive.all(),
+    isSeeded: (f) => !!q.followGet.get(f.kind, f.id)?.seeded,
+    markSeeded: (f) => q.followSeeded.run(f.kind, f.id),
+    markChecked: (f, error = null) => q.followChecked.run(error ? String(error).slice(0, 300) : null, f.kind, f.id),
+    activeFollows: (kind = null) => q.followsActive.all().filter((r) => !kind || r.kind === kind),
 
     knownIds: () => new Set(q.knownIds.all().map((r) => r.scene_id)),
     recordSeeded: db.transaction((scenes) => { for (const s of scenes) record(s, 'seeded'); }),
@@ -127,63 +146,87 @@ function createStore(db) {
   };
 }
 
+const kindLabel = (kind) => (kind === 'performer' ? 'Interprète' : 'Studio');
+
 /**
  * Un tour de vérification.
  *
  * Règles :
  *  - Les favoris illisibles ⇒ le tour entier lève : on ne lit JAMAIS un
- *    échec comme « aucun studio suivi ».
- *  - Un studio en erreur est sauté pour ce tour : aucune de ses scènes n'est
+ *    échec comme « plus rien n'est suivi ».
+ *  - Un suivi en erreur est sauté pour ce tour : aucune de ses scènes n'est
  *    évaluée ni consommée, il est repris au tour suivant.
  *  - Une scène n'est enregistrée « annoncée » que si elle est réellement
  *    partie dans au moins un salon. Sinon elle sera retentée.
- *  - Premier passage d'un studio (nouveau favori) : ses sorties récentes sont
+ *  - Premier passage d'un suivi (nouveau favori) : ses sorties récentes sont
  *    amorcées en silence, pour ne pas inonder le salon de l'historique.
+ *    Les suivis déjà amorcés passent EN PREMIER : une sortie d'un studio
+ *    suivi n'est jamais avalée par l'amorçage d'un interprète ajouté le même
+ *    jour (et inversement).
+ *  - Une scène trouvée par plusieurs suivis n'est annoncée qu'une fois, avec
+ *    tous ses motifs (« via »).
  */
 async function runRound({
-  store, fetchFavoriteStudios, fetchStudioScenes, deliver,
+  store, fetchFollows, fetchScenes, deliver,
   today, maxAgeDays, maxPerRound = 20, pauseMs = 0, log = () => {},
 }) {
-  const studios = await fetchFavoriteStudios();
-  if (!Array.isArray(studios)) throw new Error('liste des favoris StashDB illisible');
-  store.syncStudios(studios);
+  const follows = await fetchFollows();
+  if (!Array.isArray(follows) || follows.some((f) => !FOLLOW_KINDS.includes(f?.kind) || !f.id)) {
+    throw new Error('liste des favoris StashDB illisible');
+  }
+  store.syncFollows(follows);
 
-  const summary = { studios: studios.length, failures: 0, seeded: 0, sent: 0, waiting: 0, deferred: 0, noChannel: false };
+  const summary = {
+    studios: follows.filter((f) => f.kind === 'studio').length,
+    performers: follows.filter((f) => f.kind === 'performer').length,
+    failures: 0, seeded: 0, sent: 0, waiting: 0, deferred: 0, noChannel: false,
+  };
   const known = store.knownIds();
-  const pending = [];
+  const pending = new Map(); // scene_id → { scene, via: [libellés] }
 
-  for (const studio of studios) {
+  // Suivis amorcés d'abord, nouveaux ensuite (voir règles).
+  const ordered = [...follows].sort((a, b) => Number(!store.isSeeded(a)) - Number(!store.isSeeded(b)));
+
+  for (const follow of ordered) {
+    const label = `${kindLabel(follow.kind)} « ${follow.name} »`;
     try {
-      const scenes = await fetchStudioScenes(studio);
+      const scenes = await fetchScenes(follow);
+      const seeded = store.isSeeded(follow);
+      if (seeded) {
+        for (const s of scenes || []) {
+          const p = pending.get(s?.id);
+          if (p && !p.via.includes(follow.name)) p.via.push(follow.name);
+        }
+      }
       const fresh = selectNewReleases(scenes, known, today, maxAgeDays);
       for (const s of fresh) known.add(s.id);
-      if (!store.isSeeded(studio.id)) {
+      if (!seeded) {
         store.recordSeeded(fresh);
-        store.markSeeded(studio.id);
+        store.markSeeded(follow);
         summary.seeded += fresh.length;
-        if (fresh.length) log(`  "${studio.name}" : nouveau studio suivi, ${fresh.length} sortie(s) récente(s) amorcée(s) sans annonce`);
+        if (fresh.length) log(`  ${label} : nouveau suivi, ${fresh.length} sortie(s) récente(s) amorcée(s) sans annonce`);
       } else {
-        pending.push(...fresh);
+        for (const s of fresh) pending.set(s.id, { scene: s, via: [follow.name] });
       }
-      store.markChecked(studio.id, null);
+      store.markChecked(follow, null);
     } catch (err) {
       summary.failures++;
-      store.markChecked(studio.id, err.message);
-      log(`  ⚠ Studio "${studio.name}" non vérifié : ${err.message}`);
+      store.markChecked(follow, err.message);
+      log(`  ⚠ ${label} non vérifié : ${err.message}`);
     }
     if (pauseMs) await new Promise((r) => setTimeout(r, pauseMs));
   }
   if (summary.failures > 0) {
-    log(`  ⚠ ${summary.failures}/${studios.length} studio(s) non vérifié(s) : repris au tour suivant.`);
+    log(`  ⚠ ${summary.failures}/${follows.length} suivi(s) non vérifié(s) : repris au tour suivant.`);
   }
 
-  const queue = sortChronologically(pending);
+  const queue = sortChronologically([...pending.values()].map((p) => p.scene));
   const batch = queue.slice(0, maxPerRound);
   summary.deferred = queue.length - batch.length;
 
   for (let i = 0; i < batch.length; i++) {
     const scene = batch[i];
-    const { channels, sent } = await deliver(scene);
+    const { channels, sent } = await deliver(scene, pending.get(scene.id).via);
     if (channels === 0) {
       summary.noChannel = true;
       summary.waiting = batch.length - i;
@@ -201,4 +244,4 @@ async function runRound({
   return summary;
 }
 
-module.exports = { MAX_CHANNEL_ERRORS, migrate, createStore, runRound };
+module.exports = { MAX_CHANNEL_ERRORS, FOLLOW_KINDS, migrate, createStore, runRound };
