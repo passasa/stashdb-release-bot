@@ -1,20 +1,51 @@
+# Lancement avec l'image publiée (aucune compilation, aucune copie du code) :
+#
+#   1. Placez ce fichier et un fichier .env (modèle : .env.example) dans un dossier.
+#   2. docker compose up -d
+#
+# Mise à jour : docker compose pull && docker compose up -d
+# Journaux    : docker compose logs -f
+# Construire depuis les sources : voir compose.build.yml
+
 services:
   bot:
-    build: .
+    image: ghcr.io/passasa/stashdb-release-bot:latest
     container_name: stashdb-release-bot
     restart: unless-stopped
+
     # Configuration et secrets : uniquement dans .env, jamais dans ce fichier.
     env_file: .env
     environment:
       BOT_DATA_DIR: /data
+
+    # bot.db vit dans ce volume : il survit aux mises à jour de l'image.
     volumes:
       - bot-data:/data
+
+    # Durcissement : système de fichiers en lecture seule (seul /data est
+    # inscriptible), aucune capacité Linux, pas d'élévation de privilèges.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # Un bot Discord n'a besoin de presque rien.
+    mem_limit: 256m
+    cpus: 0.5
+
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+    # Laisse le temps de fermer proprement la connexion Discord et la base.
     stop_grace_period: 30s
+
+    # Aucun port exposé : le bot n'écoute rien, il appelle Discord et StashDB.
 
 volumes:
   bot-data:

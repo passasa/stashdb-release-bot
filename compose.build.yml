@@ -1,0 +1,10 @@
+# Variante : construire l'image depuis les sources de ce dépôt au lieu de
+# télécharger l'image publiée.
+#
+#   docker compose -f docker-compose.yml -f compose.build.yml up -d --build
+
+services:
+  bot:
+    image: stashdb-release-bot:local
+    build: .
+    pull_policy: build

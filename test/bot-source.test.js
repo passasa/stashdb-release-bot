@@ -55,4 +55,22 @@ describe('src/bot.js', () => {
     expect(dockerfile).toContain('COPY src ./src');
     expect(dockerfile).not.toContain('.env');
   });
+
+  it('docker-compose.yml lance l’image publiée, durcie, sans secret', () => {
+    const compose = fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8');
+    expect(compose).toMatch(/^\s*image: ghcr\.io\/[\w-]+\/stashdb-release-bot:latest$/m);
+    expect(compose).not.toMatch(/^\s*build:/m);
+    expect(compose).toContain('env_file: .env');
+    expect(compose).toContain('bot-data:/data');
+    expect(compose).toContain('read_only: true');
+    expect(compose).not.toMatch(/^\s*ports:/m);
+    expect(compose).not.toMatch(/^\s*(DISCORD_TOKEN|STASH_API_KEY|CLIENT_ID)\s*:/m);
+  });
+
+  it('l’image n’est publiée qu’après des tests verts', () => {
+    const wf = fs.readFileSync(path.join(root, '.github', 'workflows', 'docker.yml'), 'utf8');
+    expect(wf).toMatch(/needs: test/);
+    expect(wf).toContain('secrets.GITHUB_TOKEN');
+    expect(wf).toContain('linux/amd64,linux/arm64');
+  });
 });

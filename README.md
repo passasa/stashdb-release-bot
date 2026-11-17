@@ -81,15 +81,40 @@ npm start
 
 La base est créée dans `./data/bot.db`.
 
-### Avec Docker
+### Avec Docker (image prête à l'emploi)
+
+Une image multi-architecture (**amd64** et **arm64**, PC comme NAS) est
+publiée sur `ghcr.io/passasa/stashdb-release-bot` à chaque version. Le dépôt
+n'est pas nécessaire : il suffit de [`docker-compose.yml`](docker-compose.yml)
+et d'un `.env` dans un même dossier.
 
 ```bash
-docker compose up -d --build
+mkdir stashdb-release-bot && cd stashdb-release-bot
+curl -fsSLO https://raw.githubusercontent.com/passasa/stashdb-release-bot/main/docker-compose.yml
+curl -fsSL -o .env https://raw.githubusercontent.com/passasa/stashdb-release-bot/main/.env.example
+# renseignez DISCORD_TOKEN, CLIENT_ID et STASH_API_KEY dans .env, puis :
+docker compose up -d
 docker compose logs -f
 ```
 
-Le conteneur redémarre tout seul (`restart: unless-stopped`) et garde ses
-données dans le volume `bot-data`. Aucun port n'est exposé.
+| Action | Commande |
+|---|---|
+| Mettre à jour | `docker compose pull && docker compose up -d` |
+| Arrêter | `docker compose down` (les données restent) |
+| Repartir de zéro | `docker compose down -v` (supprime `bot.db`) |
+| Construire depuis les sources | `docker compose -f docker-compose.yml -f compose.build.yml up -d --build` |
+
+Le conteneur redémarre tout seul (`restart: unless-stopped`), garde ses données
+dans le volume `bot-data`, n'expose aucun port et tourne durci : système de
+fichiers en lecture seule hors `/data`, aucune capacité Linux, 256 Mo de
+mémoire au plus.
+
+Étiquettes : `latest` (branche `main`), `X.Y.Z` et `X.Y` (versions taguées
+`vX.Y.Z`), `sha-<commit>`. Pour figer une version, remplacez `latest` dans
+`docker-compose.yml`.
+
+Portainer, Synology, Unraid… : créez une *stack* avec le contenu de
+`docker-compose.yml` et renseignez les variables de `.env.example`.
 
 Au démarrage, le journal doit afficher :
 
