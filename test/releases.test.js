@@ -265,3 +265,93 @@ describe('migration depuis la version 1.0', () => {
     expect(await h.run()).toMatchObject({ seeded: 0, sent: 1 });
   });
 });
+
+describe('identifiants envoyés : aucun doublon', () => {
+  const S1 = { id: 's1', name: 'Studio s1' };
+
+  // Vrai createDeliverer, sur deux salons ; send(row, scene) est simulé.
+  function realDelivery(store, outcomeFor = () => 'sent') {
+    store.setChannel('c1', 'g');
+    store.setChannel('c2', 'g');
+    const posts = [];
+    const deliver = tracker.createDeliverer({
+      store,
+      send: async (row, sc) => {
+        const outcome = outcomeFor(row, sc);
+        if (outcome === 'sent' || outcome === 'uncertain') posts.push(`${sc.id}@${row.channel_id}`);
+        if (outcome instanceof Error) throw outcome;
+        return outcome;
+      },
+    });
+    return { posts, deliver };
+  }
+
+  it('l’identifiant est enregistré par salon : un second envoi de la même scène ne poste rien', async () => {
+    const { store } = setup();
+    const { posts, deliver } = realDelivery(store);
+    const sc = scene('a', '2026-11-16');
+    expect(await deliver(sc)).toMatchObject({ channels: 2, sent: 2, posted: 2, skipped: 0 });
+    expect(await deliver(sc)).toMatchObject({ channels: 2, sent: 2, posted: 0, skipped: 2 });
+    expect(posts).toEqual(['a@c1', 'a@c2']);
+    expect(store.deliveriesOf('a').map((d) => d.state)).toEqual(['sent', 'sent']);
+  });
+
+  it('plantage entre l’envoi et l’enregistrement de la sortie : rien n’est reposté au tour suivant', async () => {
+    const { store } = setup();
+    const { posts, deliver } = realDelivery(store);
+    const opts = { studios: [S1], scenes: { s1: [] } };
+    const run = () => tracker.runRound({
+      store, today: TODAY, maxAgeDays: 30,
+      fetchFollows: async () => opts.studios.map((f) => ({ kind: 'studio', ...f })),
+      fetchScenes: async () => opts.scenes.s1,
+      deliver,
+    });
+    await run(); // amorçage
+    opts.scenes.s1 = [scene('a', '2026-11-16')];
+
+    const recordSent = store.recordSent;
+    store.recordSent = () => { throw new Error('arrêt brutal'); };
+    await expect(run()).rejects.toThrow('arrêt brutal');
+    store.recordSent = recordSent;
+
+    expect(await run()).toMatchObject({ sent: 1 });
+    expect(posts).toEqual(['a@c1', 'a@c2']); // une seule fois par salon
+    expect(await run()).toMatchObject({ sent: 0 });
+    expect(posts).toHaveLength(2);
+  });
+
+  it('refus de Discord : la réservation est libérée et la scène retentée dans ce salon seulement', async () => {
+    const { store } = setup();
+    let c2Down = true;
+    const { posts, deliver } = realDelivery(store, (row) => (row.channel_id === 'c2' && c2Down ? 'failed' : 'sent'));
+    const sc = scene('a', '2026-11-16');
+    expect(await deliver(sc)).toMatchObject({ posted: 1 });
+    c2Down = false;
+    expect(await deliver(sc)).toMatchObject({ posted: 1, skipped: 1 });
+    expect(posts).toEqual(['a@c1', 'a@c2']);
+  });
+
+  it('issue inconnue (coupure, exception) : dans le doute, jamais renvoyée', async () => {
+    const { store } = setup();
+    let first = true;
+    const { posts, deliver } = realDelivery(store, (row) => {
+      if (!first) return 'sent';
+      return row.channel_id === 'c1' ? 'uncertain' : new Error('socket hang up');
+    });
+    const sc = scene('a', '2026-11-16');
+    expect(await deliver(sc)).toMatchObject({ posted: 0, skipped: 2, sent: 2 });
+    first = false;
+    expect(await deliver(sc)).toMatchObject({ posted: 0, skipped: 2 });
+    expect(posts).toEqual(['a@c1']);
+  });
+
+  it('un nouveau salon reçoit les scènes suivantes, sans rejouer celles déjà envoyées ailleurs', async () => {
+    const { store } = setup();
+    const { posts, deliver } = realDelivery(store);
+    await deliver(scene('a', '2026-11-16'));
+    store.setChannel('c3', 'g');
+    await deliver(scene('b', '2026-11-16'));
+    await deliver(scene('a', '2026-11-16'));
+    expect(posts).toEqual(['a@c1', 'a@c2', 'b@c1', 'b@c2', 'b@c3', 'a@c3']);
+  });
+});

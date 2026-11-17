@@ -12,14 +12,14 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 require('dotenv').config({ path: path.join(ROOT_DIR, '.env') });
 const {
   Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder,
-  PermissionFlagsBits, MessageFlags, ChannelType, Events,
+  PermissionFlagsBits, MessageFlags, ChannelType, Events, DiscordAPIError,
 } = require('discord.js');
 const Database = require('better-sqlite3');
 const {
   todayIn, parsePollInterval, parseMaxAgeDays, buildReleaseEmbed,
   escapeMarkdown, truncate, formatDate, sceneUrl, DEFAULT_TIMEZONE,
 } = require('./releases');
-const { migrate, createStore, runRound } = require('./tracker');
+const { migrate, createStore, createDeliverer, runRound } = require('./tracker');
 
 // ── Configuration ──────────────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -132,9 +132,13 @@ const client = new Client({
   allowedMentions: { parse: [] },
 });
 
-/** Envoie une annonce dans un salon. Rend true seulement si le message est parti. */
+/**
+ * Envoie une annonce dans un salon. Rend 'sent', 'failed' (refus certain :
+ * réessayable) ou 'uncertain' (issue inconnue : jamais renvoyée, pas de doublon).
+ */
 async function sendToChannel(row, embed) {
   let reason;
+  let outcome = 'failed';
   try {
     const channel = await client.channels.fetch(row.channel_id).catch(() => null);
     if (!channel || !channel.isTextBased() || typeof channel.send !== 'function') {
@@ -144,26 +148,32 @@ async function sendToChannel(row, embed) {
     } else {
       await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
       store.channelOk(row.channel_id);
-      return true;
+      return 'sent';
     }
   } catch (err) {
     reason = err.message;
+    // Réponse d'erreur de Discord (statut HTTP) = message refusé. Sinon
+    // (délai dépassé, coupure) il a pu partir : on ne le renverra pas.
+    if (!(err instanceof DiscordAPIError) && typeof err?.status !== 'number') outcome = 'uncertain';
   }
   const disabled = store.channelFailed(row.channel_id, reason);
-  console.log(`  ⚠ Salon ${row.channel_id} : ${reason}${disabled ? ' — désactivé après échecs répétés (le redéfinir avec /sorties salon)' : ''}`);
-  return false;
+  console.log(`  ⚠ Salon ${row.channel_id} : ${reason}${disabled ? ' — désactivé après échecs répétés (le redéfinir avec /sorties salon)' : ''}`
+    + (outcome === 'uncertain' ? ' — issue inconnue, la scène ne sera pas renvoyée dans ce salon' : ''));
+  return outcome;
 }
 
+// Chaque identifiant de scène est enregistré par salon au moment de l'envoi :
+// une scène n'est jamais postée deux fois dans le même salon.
+const deliverOnce = createDeliverer({
+  store,
+  send: (row, scene, via) => sendToChannel(row, buildReleaseEmbed(scene, STASH_ENDPOINT, via)),
+});
+
 async function deliver(scene, via = []) {
-  const channels = store.activeChannels();
-  if (channels.length === 0) return { channels: 0, sent: 0 };
-  const embed = buildReleaseEmbed(scene, STASH_ENDPOINT, via);
-  let sent = 0;
-  for (const row of channels) {
-    if (await sendToChannel(row, embed)) sent++;
-  }
-  if (sent > 0) console.log(`  ✓ ${scene.studio?.name || '?'} — ${scene.title} (${sent} salon(s))`);
-  return { channels: channels.length, sent };
+  const result = await deliverOnce(scene, via);
+  if (result.posted > 0) console.log(`  ✓ ${scene.studio?.name || '?'} — ${scene.title} (${result.posted} salon(s))`);
+  if (result.skipped > 0) console.log(`  · ${scene.title} : déjà envoyée dans ${result.skipped} salon(s), pas de doublon`);
+  return result;
 }
 
 // ── Tour de vérification ───────────────────────────────────────────────────

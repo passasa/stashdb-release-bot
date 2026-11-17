@@ -12,6 +12,9 @@ interprètes, image, lien et la raison de l'annonce (« suivi : … »).
   vos favoris StashDB, studios comme interprètes.
 - **Une seule annonce par scène**, même si elle est trouvée par un studio et
   par un ou plusieurs interprètes suivis.
+- **Aucun doublon** : l'identifiant de chaque scène est enregistré, salon par
+  salon, au moment de l'envoi ; une scène déjà postée dans un salon n'y
+  repart jamais, même après un redémarrage ou un plantage.
 - **Pas d'avalanche** : un studio ou interprète nouvellement suivi ne déverse pas son
   historique, seules les sorties suivantes sont annoncées.
 - **Rien n'est perdu** : une scène n'est marquée « annoncée » qu'une fois
@@ -193,6 +196,9 @@ intervalle (jamais deux tours en même temps) :
 |---|---|
 | Aucun salon configuré | Les sorties attendent ; elles partent dès qu'un salon est défini. |
 | Envoi impossible partout | La scène est retentée au tour suivant. |
+| Discord refuse le message dans un salon | Retenté au tour suivant dans ce salon seulement ; les autres ne la reçoivent pas deux fois. |
+| Issue d'envoi inconnue (coupure réseau pendant l'envoi) | Pas de nouvel essai dans ce salon : dans le doute, mieux vaut ne pas risquer un doublon. |
+| Arrêt du bot juste après un envoi | Au redémarrage, la scène est reconnue comme déjà envoyée et n'est pas repostée. |
 | Un studio ou interprète ne répond pas | Ce suivi seul est sauté, et repris au tour suivant (⚠ dans `/sorties suivis`). |
 | StashDB injoignable | Le tour est annulé sans rien modifier. |
 | Interprète ajouté le jour d'une sortie d'un studio déjà suivi | La sortie est bien annoncée (les suivis connus passent avant l'amorçage). |
@@ -209,8 +215,8 @@ intervalle (jamais deux tours en même temps) :
 
 ### Données
 
-`bot.db` (SQLite) contient les salons, les studios et interprètes suivis, les scènes déjà vues
-et l'état du dernier tour. Le supprimer revient à repartir de zéro (les
+`bot.db` (SQLite) contient les salons, les studios et interprètes suivis, les scènes déjà vues,
+le journal des envois (identifiant de scène × salon) et l'état du dernier tour. Le supprimer revient à repartir de zéro (les
 sorties récentes seront de nouveau amorcées, pas annoncées).
 
 ---

@@ -37,6 +37,17 @@ const SCHEMA = `
     recorded_at TEXT DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_releases_state ON releases(state, recorded_at);
+  -- Journal des envois : un identifiant de scène n'est posté qu'une fois par
+  -- salon. La ligne est écrite AVANT l'envoi ('sending'), confirmée après
+  -- ('sent') et supprimée seulement si Discord a refusé le message.
+  CREATE TABLE IF NOT EXISTS deliveries (
+    scene_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('sending', 'sent')),
+    claimed_at TEXT DEFAULT (datetime('now')),
+    sent_at TEXT,
+    PRIMARY KEY (scene_id, channel_id)
+  );
   CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -98,6 +109,10 @@ function createStore(db) {
     `),
     latestSent: db.prepare("SELECT * FROM releases WHERE state = 'sent' AND title IS NOT NULL ORDER BY recorded_at DESC, rowid DESC LIMIT ?"),
     countByState: db.prepare('SELECT state, COUNT(*) AS n FROM releases GROUP BY state'),
+    claim: db.prepare("INSERT OR IGNORE INTO deliveries (scene_id, channel_id, state) VALUES (?, ?, 'sending')"),
+    confirm: db.prepare("UPDATE deliveries SET state = 'sent', sent_at = datetime('now') WHERE scene_id = ? AND channel_id = ?"),
+    release: db.prepare("DELETE FROM deliveries WHERE scene_id = ? AND channel_id = ? AND state = 'sending'"),
+    deliveriesOf: db.prepare('SELECT channel_id, state FROM deliveries WHERE scene_id = ?'),
   };
 
   const record = (scene, state) => q.record.run(
@@ -143,6 +158,54 @@ function createStore(db) {
     recordSent: (scene) => record(scene, 'sent'),
     latestSent: (limit = 10) => q.latestSent.all(limit),
     counts: () => Object.fromEntries(q.countByState.all().map((r) => [r.state, r.n])),
+
+    /** Réserve l'envoi d'une scène dans un salon. false = déjà envoyée (ou en cours) : ne pas renvoyer. */
+    claimDelivery: (sceneId, channelId) => q.claim.run(sceneId, channelId).changes > 0,
+    confirmDelivery: (sceneId, channelId) => q.confirm.run(sceneId, channelId),
+    releaseDelivery: (sceneId, channelId) => q.release.run(sceneId, channelId),
+    deliveriesOf: (sceneId) => q.deliveriesOf.all(sceneId),
+  };
+}
+
+/**
+ * Fabrique la fonction d'envoi utilisée par runRound : chaque identifiant de
+ * scène est enregistré par salon AVANT l'envoi, pour qu'aucune scène ne soit
+ * jamais postée deux fois dans le même salon (nouveau tour, redémarrage,
+ * plantage entre l'envoi et l'enregistrement, scène trouvée par plusieurs
+ * suivis…).
+ *
+ * send(row, scene, via) rend :
+ *  - 'sent'      : message posté → envoi confirmé ;
+ *  - 'failed'    : Discord a refusé (ou salon invalide) → réservation libérée,
+ *                  la scène pourra être retentée ;
+ *  - 'uncertain' : issue inconnue (coupure réseau…) → réservation gardée :
+ *                  dans le doute, on ne renvoie pas (pas de doublon).
+ */
+function createDeliverer({ store, send }) {
+  return async function deliver(scene, via = []) {
+    const channels = store.activeChannels();
+    if (channels.length === 0) return { channels: 0, sent: 0, posted: 0, skipped: 0 };
+    let posted = 0;
+    let skipped = 0;
+    for (const row of channels) {
+      if (!store.claimDelivery(scene.id, row.channel_id)) { skipped++; continue; }
+      let outcome;
+      try {
+        outcome = await send(row, scene, via);
+      } catch {
+        outcome = 'uncertain';
+      }
+      if (outcome === 'sent' || outcome === true) {
+        store.confirmDelivery(scene.id, row.channel_id);
+        posted++;
+      } else if (outcome === 'uncertain') {
+        skipped++;
+      } else {
+        store.releaseDelivery(scene.id, row.channel_id);
+      }
+    }
+    // « sent » : salons où la scène est (ou est présumée) publiée.
+    return { channels: channels.length, sent: posted + skipped, posted, skipped };
   };
 }
 
@@ -165,6 +228,8 @@ const kindLabel = (kind) => (kind === 'performer' ? 'Interprète' : 'Studio');
  *    jour (et inversement).
  *  - Une scène trouvée par plusieurs suivis n'est annoncée qu'une fois, avec
  *    tous ses motifs (« via »).
+ *  - Avec createDeliverer, l'identifiant de chaque scène est enregistré par
+ *    salon dès l'envoi : jamais deux fois la même scène dans un salon.
  */
 async function runRound({
   store, fetchFollows, fetchScenes, deliver,
@@ -244,4 +309,4 @@ async function runRound({
   return summary;
 }
 
-module.exports = { MAX_CHANNEL_ERRORS, FOLLOW_KINDS, migrate, createStore, runRound };
+module.exports = { MAX_CHANNEL_ERRORS, FOLLOW_KINDS, migrate, createStore, createDeliverer, runRound };

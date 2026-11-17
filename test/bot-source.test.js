@@ -20,12 +20,19 @@ function body(start) {
 }
 
 describe('src/bot.js', () => {
-  it('sendToChannel rend true seulement après un envoi réussi, et vérifie NSFW', () => {
+  it('sendToChannel rend « sent » seulement après un envoi réussi, et vérifie NSFW', () => {
     const b = body('async function sendToChannel(');
     expect(b.indexOf('await channel.send(')).toBeGreaterThan(-1);
-    expect(b.indexOf('await channel.send(')).toBeLessThan(b.indexOf('return true;'));
-    expect(b).toContain('return false;');
+    expect(b.indexOf('await channel.send(')).toBeLessThan(b.indexOf("return 'sent';"));
+    expect(b).toContain("let outcome = 'failed';");
     expect(b).toContain('channel.nsfw');
+  });
+
+  it('les annonces passent par le journal des envois (aucun doublon par salon)', () => {
+    expect(bot).toMatch(/createDeliverer\(\{\s*store,/);
+    const d = body('async function deliver(');
+    expect(d).toContain('deliverOnce(');
+    expect(d).not.toContain('sendToChannel(');
   });
 
   it('commande réservée aux gestionnaires, déclarée et vérifiée à l’exécution', () => {
