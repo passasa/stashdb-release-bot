@@ -1,0 +1,213 @@
+# stashdb-release-bot
+
+Bot Discord qui **annonce les nouvelles sorties des studios que vous suivez sur
+[StashDB](https://stashdb.org)**. Mettez un studio en favori sur votre compte
+StashDB : dès qu'une nouvelle scène sort, le bot la publie dans vos salons
+Discord, avec titre, studio, date, durée, interprètes, image et lien.
+
+![Tests](../../actions/workflows/tests.yml/badge.svg)
+
+- **Zéro configuration côté Discord pour suivre un studio** : la liste suivie,
+  ce sont vos favoris StashDB.
+- **Pas d'avalanche** : un studio nouvellement suivi ne déverse pas son
+  historique, seules les sorties suivantes sont annoncées.
+- **Rien n'est perdu** : une scène n'est marquée « annoncée » qu'une fois
+  réellement postée ; une panne de StashDB ou de Discord est simplement
+  rattrapée au tour suivant.
+- **Scènes annoncées à l'avance** : publiées le jour de leur sortie, pas avant.
+- **Léger** : un processus Node.js, une base SQLite locale, aucun port ouvert.
+
+> StashDB référence du contenu pour adultes : le bot ne publie **que dans des
+> salons marqués NSFW**, vérifiés à la configuration et à chaque envoi.
+
+---
+
+## Sommaire
+
+1. [Prérequis](#prérequis)
+2. [Créer l'application Discord](#1-créer-lapplication-discord)
+3. [Récupérer la clé API StashDB](#2-récupérer-la-clé-api-stashdb)
+4. [Installer et lancer](#3-installer-et-lancer)
+5. [Utilisation : la commande `/sorties`](#utilisation--la-commande-sorties)
+6. [Configuration](#configuration)
+7. [Fonctionnement](#fonctionnement)
+8. [Développement](#développement)
+
+---
+
+## Prérequis
+
+- **Node.js 20 ou plus récent** (ou Docker) ;
+- un **compte StashDB** et sa clé API ;
+- un **serveur Discord** sur lequel vous avez la permission *Gérer le serveur*.
+
+## 1. Créer l'application Discord
+
+1. Ouvrez le [portail développeur Discord](https://discord.com/developers/applications)
+   → **New Application**.
+2. Page **General Information** : copiez l'**Application ID** → `CLIENT_ID`.
+3. Page **Bot** : **Reset Token**, copiez le jeton → `DISCORD_TOKEN`.
+   Aucun *Privileged Gateway Intent* n'est nécessaire.
+4. Page **OAuth2 → URL Generator** : cochez les scopes `bot` et
+   `applications.commands`, puis les permissions **View Channels**,
+   **Send Messages** et **Embed Links**. Ouvrez l'URL générée pour inviter le
+   bot sur votre serveur.
+
+   Raccourci (remplacez `CLIENT_ID`) :
+   ```
+   https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot+applications.commands&permissions=19456
+   ```
+
+## 2. Récupérer la clé API StashDB
+
+1. Connectez-vous à StashDB, ouvrez votre **profil** et copiez votre **API key**
+   → `STASH_API_KEY`.
+2. Mettez en **favori** (étoile sur la page du studio) chaque studio à suivre.
+
+## 3. Installer et lancer
+
+```bash
+git clone https://github.com/passasa/stashdb-release-bot.git
+cd stashdb-release-bot
+cp .env.example .env    # puis renseignez DISCORD_TOKEN, CLIENT_ID et STASH_API_KEY
+```
+
+### Avec Node.js
+
+```bash
+npm ci --omit=dev
+npm start
+```
+
+La base est créée dans `./data/bot.db`.
+
+### Avec Docker
+
+```bash
+docker compose up -d --build
+docker compose logs -f
+```
+
+Le conteneur redémarre tout seul (`restart: unless-stopped`) et garde ses
+données dans le volume `bot-data`. Aucun port n'est exposé.
+
+Au démarrage, le journal doit afficher :
+
+```
+✓ Connecté à Discord : MonBot#1234
+  ✓ Commande /sorties enregistrée
+  Vérification toutes les 60 min, sorties de moins de 30 jours.
+```
+
+Dernière étape, dans Discord : `/sorties salon canal:#nouveautes`.
+
+---
+
+## Utilisation : la commande `/sorties`
+
+Réservée aux membres ayant *Gérer le serveur* ; toutes les réponses ne sont
+visibles que par vous.
+
+| Sous-commande | Effet |
+|---|---|
+| `/sorties salon canal:` | Annonce les nouvelles sorties dans ce salon (NSFW obligatoire). Plusieurs salons possibles. |
+| `/sorties retirer-salon canal:` | N'annonce plus dans ce salon. |
+| `/sorties studios` | Liste des studios suivis (vos favoris StashDB). |
+| `/sorties dernieres` | Les 10 dernières sorties annoncées, avec lien. |
+| `/sorties etat` | Salons, studios, dernier et prochain tour, erreurs éventuelles. |
+| `/sorties verifier` | Lance une vérification immédiatement. |
+
+Pour **suivre** ou **ne plus suivre** un studio, ajoutez-le ou retirez-le de vos
+favoris sur StashDB : la liste se met à jour au tour suivant
+(ou tout de suite avec `/sorties verifier`).
+
+---
+
+## Configuration
+
+Toutes les options se règlent dans `.env` (voir [`.env.example`](.env.example)).
+
+| Variable | Requis | Défaut | Rôle |
+|---|---|---|---|
+| `DISCORD_TOKEN` | oui | | Jeton du bot |
+| `CLIENT_ID` | oui | | ID de l'application Discord |
+| `STASH_API_KEY` | oui | | Clé API du compte StashDB dont les favoris sont suivis |
+| `STASH_ENDPOINT` | | `https://stashdb.org/graphql` | Point GraphQL (une autre instance stash-box fonctionne aussi) ; les liens des annonces en sont déduits |
+| `POLL_STASHDB_MS` | | `3600000` (1 h) | Intervalle de vérification, 5 min minimum |
+| `RELEASES_MAX_AGE_DAYS` | | `30` | Une scène plus ancienne n'est jamais annoncée |
+| `BOT_TIMEZONE` | | `Europe/Paris` | Fuseau qui décide de « aujourd'hui » |
+| `ALLOWED_GUILDS` | | *(tous)* | IDs de serveurs autorisés, séparés par des virgules ; le bot quitte les autres |
+| `BOT_DATA_DIR` | | `./data` | Répertoire de `bot.db` (`/data` en Docker) |
+
+---
+
+## Fonctionnement
+
+Un tour de vérification a lieu 15 s après le démarrage, puis à chaque
+intervalle (jamais deux tours en même temps) :
+
+1. lecture de vos **studios favoris** sur StashDB ;
+2. pour chacun, lecture de ses **25 dernières scènes** ;
+3. sélection des scènes **sorties** (date ≤ aujourd'hui et de moins de
+   `RELEASES_MAX_AGE_DAYS` jours) et **jamais vues** ;
+4. pour un studio **suivi pour la première fois**, ces scènes sont enregistrées
+   sans être annoncées ;
+5. les autres sont annoncées de la plus ancienne à la plus récente, **20 au
+   plus par tour** (le reste suit au tour d'après), dans tous les salons
+   configurés.
+
+### Fiabilité
+
+| Situation | Comportement |
+|---|---|
+| Aucun salon configuré | Les sorties attendent ; elles partent dès qu'un salon est défini. |
+| Envoi impossible partout | La scène est retentée au tour suivant. |
+| Un studio ne répond pas | Ce studio seul est sauté, et repris au tour suivant (⚠ dans `/sorties studios`). |
+| StashDB injoignable | Le tour est annulé sans rien modifier. |
+| Salon en échec 5 fois de suite | Désactivé ; `/sorties salon` le réactive. |
+| Studio retiré puis remis en favori | Traité comme nouveau : pas de rattrapage massif. |
+
+### Sécurité
+
+- publication **uniquement en salon NSFW** ;
+- aucune mention possible (`@everyone`, rôles, membres) ;
+- Markdown échappé et longueurs bornées sur tout texte venant de StashDB ;
+- liens construits depuis l'identifiant de scène validé, images en HTTPS seulement ;
+- secrets uniquement dans `.env`, jamais dans l'image Docker.
+
+### Données
+
+`bot.db` (SQLite) contient les salons, les studios suivis, les scènes déjà vues
+et l'état du dernier tour. Le supprimer revient à repartir de zéro (les
+sorties récentes seront de nouveau amorcées, pas annoncées).
+
+---
+
+## Développement
+
+```
+src/
+├── bot.js       démarrage, appels StashDB, envoi Discord, commande /sorties
+├── tracker.js   base SQLite et tour de vérification (dépendances injectées)
+└── releases.js  règles pures : date de sortie, sélection, embed
+test/            tests Vitest (sans réseau ni Discord)
+```
+
+```bash
+npm ci
+npm test
+```
+
+`tracker.js` et `releases.js` ne font aucune entrée/sortie : StashDB, Discord et
+la base leur sont fournis, ce qui permet de tester des tours complets sur une
+base SQLite en mémoire. Les tests tournent à chaque push (GitHub Actions).
+
+---
+
+## Licence
+
+Aucune licence n'est accordée : le code est visible, mais tous droits sont
+réservés à son auteur. Contactez-le pour toute réutilisation.
+
+StashDB est un service tiers, sans lien avec ce projet ; respectez ses
+conditions d'utilisation et limitez la fréquence des requêtes.
