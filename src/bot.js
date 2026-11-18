@@ -17,6 +17,7 @@ const {
 const Database = require('better-sqlite3');
 const {
   todayIn, parsePollInterval, parseMaxAgeDays, buildReleaseEmbed,
+  buildReleaseComponents, parseImageButton, imageFileName, safeImage,
   escapeMarkdown, truncate, formatDate, sceneUrl, DEFAULT_TIMEZONE,
 } = require('./releases');
 const { migrate, createStore, createDeliverer, runRound } = require('./tracker');
@@ -136,7 +137,7 @@ const client = new Client({
  * Envoie une annonce dans un salon. Rend 'sent', 'failed' (refus certain :
  * réessayable) ou 'uncertain' (issue inconnue : jamais renvoyée, pas de doublon).
  */
-async function sendToChannel(row, embed) {
+async function sendToChannel(row, message) {
   let reason;
   let outcome = 'failed';
   try {
@@ -146,7 +147,7 @@ async function sendToChannel(row, embed) {
     } else if (!channel.nsfw) {
       reason = 'salon non NSFW';
     } else {
-      await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+      await channel.send({ ...message, allowedMentions: { parse: [] } });
       store.channelOk(row.channel_id);
       return 'sent';
     }
@@ -166,8 +167,63 @@ async function sendToChannel(row, embed) {
 // une scène n'est jamais postée deux fois dans le même salon.
 const deliverOnce = createDeliverer({
   store,
-  send: (row, scene, via) => sendToChannel(row, buildReleaseEmbed(scene, STASH_ENDPOINT, via)),
+  send: (row, scene, via) => sendToChannel(row, {
+    embeds: [buildReleaseEmbed(scene, STASH_ENDPOINT, via)],
+    components: buildReleaseComponents(scene),
+  }),
 });
+
+// ── Bouton « Télécharger image » ───────────────────────────────────────────
+const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const IMAGE_COOLDOWN_MS = 5000;
+const imageCooldown = new Map(); // userId → horodatage du dernier clic
+
+/** Télécharge l'image (https seulement, image/* seulement, 8 Mo au plus). */
+async function downloadImage(url) {
+  const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!/^https:/i.test(res.url || url)) throw new Error('redirection non sécurisée');
+  const type = res.headers.get('content-type') || '';
+  if (!/^image\//i.test(type)) throw new Error('le lien ne mène pas à une image');
+  if (Number(res.headers.get('content-length')) > IMAGE_MAX_BYTES) throw new Error('image trop lourde');
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > IMAGE_MAX_BYTES) throw new Error('image trop lourde');
+  return { buffer, type };
+}
+
+/** Réponse au clic (éphémère) : l'image de la scène en pièce jointe. */
+async function handleImageButton(interaction, sceneId) {
+  const last = imageCooldown.get(interaction.user.id) || 0;
+  if (Date.now() - last < IMAGE_COOLDOWN_MS) {
+    return interaction.reply(ephemeral('Doucement : un téléchargement toutes les 5 secondes.'));
+  }
+  if (imageCooldown.size > 1000) {
+    for (const [id, t] of imageCooldown) if (Date.now() - t >= IMAGE_COOLDOWN_MS) imageCooldown.delete(id);
+  }
+  imageCooldown.set(interaction.user.id, Date.now());
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const data = await stashGraphQL(
+    'query FindScene($id: ID!) { findScene(id: $id) { id title release_date studio { name } images { url } } }',
+    { id: sceneId },
+  ).catch(() => null);
+  const scene = data?.findScene;
+  if (!scene) return interaction.editReply({ content: 'Scène introuvable sur StashDB.' });
+  const url = safeImage(scene);
+  if (!url) return interaction.editReply({ content: 'Aucune image pour cette scène.' });
+
+  try {
+    const { buffer, type } = await downloadImage(url);
+    const name = imageFileName(scene, type);
+    return interaction.editReply({
+      content: `🖼️ **${escapeMarkdown(name)}**`,
+      files: [{ attachment: buffer, name }],
+      allowedMentions: { parse: [] },
+    });
+  } catch (err) {
+    return interaction.editReply({ content: `Image indisponible : ${truncate(err.message, 200)}` });
+  }
+}
 
 async function deliver(scene, via = []) {
   const result = await deliverOnce(scene, via);
@@ -344,6 +400,23 @@ async function handleSorties(interaction) {
 }
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  // Bouton « Télécharger image » des annonces : ouvert à tout membre du serveur.
+  if (interaction.isButton()) {
+    const sceneId = parseImageButton(interaction.customId);
+    if (!sceneId) return;
+    try {
+      if (!interaction.inGuild() || !isGuildAllowed(interaction.guildId)) {
+        return await interaction.reply(ephemeral('Indisponible ici.'));
+      }
+      await handleImageButton(interaction, sceneId);
+    } catch (err) {
+      console.error('[Bouton image]', err);
+      const msg = ephemeral('Une erreur est survenue.');
+      if (interaction.deferred || interaction.replied) await interaction.editReply(msg).catch(() => {});
+      else await interaction.reply(msg).catch(() => {});
+    }
+    return;
+  }
   if (!interaction.isChatInputCommand() || interaction.commandName !== 'sorties') return;
   try {
     // Contrôles à l'exécution, en plus de la permission déclarée.

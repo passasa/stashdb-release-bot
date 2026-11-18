@@ -6,6 +6,23 @@ interprète en favori sur votre compte StashDB : dès qu'une nouvelle scène sor
 le bot la publie dans vos salons Discord, avec titre, studio, date, durée,
 interprètes, image, lien et la raison de l'annonce (« suivi : … »).
 
+Chaque annonce ressemble à ceci :
+
+```
+Titre de la scène                      ← lien vers la page StashDB
+Studio: Nom du studio
+Date: 2026-11-16
+Durée: 34m
+Performeurs: Interprète A, Interprète B
+[ image de la scène ]
+StashDB — Nouvelle sortie · suivi : Nom du studio • 16/11/2026
+[ 🖼️ Télécharger image ]
+```
+
+Le bouton **Télécharger image** renvoie l'image en pièce jointe, visible
+seulement par la personne qui a cliqué (un clic toutes les 5 secondes,
+8 Mo au plus).
+
 ![Tests](../../actions/workflows/tests.yml/badge.svg)
 
 - **Zéro configuration côté Discord pour suivre** : la liste suivie, ce sont
@@ -211,6 +228,8 @@ intervalle (jamais deux tours en même temps) :
 - aucune mention possible (`@everyone`, rôles, membres) ;
 - Markdown échappé et longueurs bornées sur tout texte venant de StashDB ;
 - liens construits depuis l'identifiant de scène validé, images en HTTPS seulement ;
+- bouton « Télécharger image » : identifiant vérifié, image relue sur StashDB
+  (jamais une adresse fournie par le clic), type `image/*` et taille bornés ;
 - secrets uniquement dans `.env`, jamais dans l'image Docker.
 
 ### Données

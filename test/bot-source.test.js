@@ -28,6 +28,17 @@ describe('src/bot.js', () => {
     expect(b).toContain('channel.nsfw');
   });
 
+  it('bouton « Télécharger image » : serveur autorisé, réponse éphémère, image bornée, aucune demande', () => {
+    const h = body('async function handleImageButton(');
+    expect(h).toContain('deferReply({ flags: MessageFlags.Ephemeral })');
+    expect(h).toContain('IMAGE_COOLDOWN_MS');
+    const d = body('async function downloadImage(');
+    expect(d).toContain('IMAGE_MAX_BYTES');
+    expect(d).toMatch(/image\\\//);
+    expect(bot).toMatch(/parseImageButton\(interaction\.customId\)[\s\S]{0,200}isGuildAllowed\(interaction\.guildId\)/);
+    expect(bot).not.toMatch(/Demander sur le site|request:/i);
+  });
+
   it('les annonces passent par le journal des envois (aucun doublon par salon)', () => {
     expect(bot).toMatch(/createDeliverer\(\{\s*store,/);
     const d = body('async function deliver(');

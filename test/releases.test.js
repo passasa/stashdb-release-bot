@@ -56,8 +56,43 @@ describe('règles des sorties', () => {
     expect(embed.title.startsWith('\\*\\*gras\\*\\* \\@everyone')).toBe(true);
     expect(embed.url).toBe('https://stash.example/scenes/0b1c2d3e-aaaa-bbbb-cccc-123456789abc');
     expect(embed.image).toBeUndefined(); // seulement https
-    const fields = Object.fromEntries(embed.fields.map((f) => [f.name, f.value]));
-    expect(fields).toMatchObject({ Studio: 'Some\\_Studio', Sortie: '16/11/2026', Durée: '31 min 05 s', Interprètes: 'A, B' });
+    expect(embed.description).toBe('**Studio:** Some\\_Studio\n**Date:** 2026-11-16\n**Durée:** 31m\n**Performeurs:** A, B');
+    expect(embed.color).toBe(0x00bfff);
+    expect(embed.timestamp).toBe('2026-11-16T00:00:00.000Z');
+    expect(embed.description.length).toBeLessThanOrEqual(4096);
+  });
+
+  it('présentation : date douteuse ignorée, durée compacte, pas de champ vide', () => {
+    expect(releases.formatShortDuration(2045)).toBe('34m');
+    expect(releases.formatShortDuration(3900)).toBe('1h05m');
+    expect(releases.formatShortDuration(42)).toBe('42s');
+    expect(releases.formatShortDuration(0)).toBeNull();
+    const e = releases.buildReleaseEmbed({ id: 'abcdef12', title: 'T', release_date: '2026-11-16T00:00<@1>', studio: null }, ENDPOINT);
+    expect(e.description).toBe('**Studio:** Inconnu');
+    expect(e.timestamp).toBeUndefined();
+  });
+
+  it('bouton « Télécharger image » : seulement avec une image https et un identifiant valide', () => {
+    const withImage = { id: '0b1c2d3e-aaaa-bbbb-cccc-123456789abc', images: [{ url: 'https://cdn.example/i.jpg' }] };
+    const [row] = releases.buildReleaseComponents(withImage);
+    expect(row.components).toEqual([expect.objectContaining({
+      type: 2, style: 1, label: 'Télécharger image', custom_id: 'stashdl:0b1c2d3e-aaaa-bbbb-cccc-123456789abc',
+    })]);
+    expect(releases.buildReleaseComponents({ ...withImage, images: [{ url: 'http://x/i.jpg' }] })).toEqual([]);
+    expect(releases.buildReleaseComponents({ ...withImage, images: [] })).toEqual([]);
+    expect(releases.buildReleaseComponents({ ...withImage, id: '../../x' })).toEqual([]);
+    // Aucun bouton de demande.
+    expect(JSON.stringify(releases.buildReleaseComponents(withImage))).not.toMatch(/demand/i);
+  });
+
+  it('clic sur le bouton : identifiant vérifié, nom de fichier sans caractère interdit', () => {
+    expect(releases.parseImageButton('stashdl:0b1c2d3e-aaaa')).toBe('0b1c2d3e-aaaa');
+    expect(releases.parseImageButton('stashdl:../../etc')).toBeNull();
+    expect(releases.parseImageButton('request:0b1c2d3e')).toBeNull();
+    expect(releases.parseImageButton(undefined)).toBeNull();
+    expect(releases.imageFileName({ studio: { name: 'A/B' }, release_date: '2026-11-16', title: 'x:y?' }, 'image/png'))
+      .toBe('A_B - 2026-11-16 - x_y_.png');
+    expect(releases.imageFileName({}, 'image/jpeg')).toBe('Inconnu - Sans titre.jpg');
   });
 
   it('sceneUrl refuse un identifiant ou un protocole douteux', () => {
@@ -243,8 +278,8 @@ describe('suivi des interprètes', () => {
 
   it('l’embed indique pourquoi la scène est annoncée', () => {
     const e = releases.buildReleaseEmbed(scene('abcdef12', TODAY), ENDPOINT, ['Studio s1', 'Interprète p1']);
-    expect(e.footer.text).toBe('Nouvelle sortie · suivi : Studio s1, Interprète p1');
-    expect(releases.buildReleaseEmbed(scene('abcdef12', TODAY), ENDPOINT).footer.text).toBe('Nouvelle sortie');
+    expect(e.footer.text).toBe('StashDB — Nouvelle sortie · suivi : Studio s1, Interprète p1');
+    expect(releases.buildReleaseEmbed(scene('abcdef12', TODAY), ENDPOINT).footer.text).toBe('StashDB — Nouvelle sortie');
   });
 });
 

@@ -5,7 +5,10 @@ const DEFAULT_TIMEZONE = 'Europe/Paris';
 const DEFAULT_MAX_AGE_DAYS = 30;
 const MIN_POLL_MS = 5 * 60 * 1000;
 const DEFAULT_POLL_MS = 60 * 60 * 1000;
-const EMBED_COLOR = 0xe11d48;
+const EMBED_COLOR = 0x00bfff;
+/** Préfixe du bouton « Télécharger image » : stashdl:<id de scène>. */
+const IMAGE_BUTTON_PREFIX = 'stashdl:';
+const SCENE_ID_RE = /^[0-9a-f-]{8,64}$/i;
 
 /** Date du jour (AAAA-MM-JJ) dans le fuseau donné. */
 function todayIn(timeZone = DEFAULT_TIMEZONE, now = new Date()) {
@@ -87,6 +90,16 @@ function formatDuration(seconds) {
   return h > 0 ? `${h} h ${pad(m)} min` : `${m} min ${pad(sec)} s`;
 }
 
+/** Durée compacte des annonces : 2045 → « 34m », 3900 → « 1h05m ». */
+function formatShortDuration(seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s <= 0) return null;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h > 0) return `${h}h${String(m).padStart(2, '0')}m`;
+  return m > 0 ? `${m}m` : `${Math.round(s)}s`;
+}
+
 /** 2026-11-16 → 16/11/2026 */
 function formatDate(isoDate) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(isoDate || '');
@@ -101,7 +114,7 @@ function sceneUrl(endpoint, sceneId) {
   try {
     const u = new URL(endpoint);
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
-    if (!/^[0-9a-f-]{8,64}$/i.test(String(sceneId))) return null;
+    if (!SCENE_ID_RE.test(String(sceneId))) return null;
     return `${u.origin}/scenes/${sceneId}`;
   } catch {
     return null;
@@ -114,32 +127,65 @@ function safeImage(scene) {
   return url && /^https:\/\//i.test(url) ? url : null;
 }
 
-/** Embed Discord (objet APIEmbed) d'une sortie, borné aux limites Discord. */
-/** `via` : noms des suivis (studios, interprètes) qui ont fait trouver la scène. */
+/**
+ * Annonce d'une sortie (embed + bouton), bornée aux limites Discord.
+ * Présentation : titre cliquable vers StashDB, lignes Studio / Date / Durée /
+ * Performeurs, image, pied « StashDB — Nouvelle sortie » horodaté à la date de
+ * sortie, bouton « Télécharger image » quand la scène a une image.
+ * `via` : noms des suivis (studios, interprètes) qui ont fait trouver la scène.
+ */
 function buildReleaseEmbed(scene, endpoint, via = []) {
-  const studio = scene.studio?.name || 'Studio inconnu';
   const performers = (scene.performers || [])
     .map((p) => p?.performer?.name || p?.name)
     .filter(Boolean);
-  const fields = [{ name: 'Studio', value: truncate(escapeMarkdown(studio), 1024), inline: true }];
-  const date = formatDate(scene.release_date);
-  if (date) fields.push({ name: 'Sortie', value: date, inline: true });
-  const duration = formatDuration(scene.duration);
-  if (duration) fields.push({ name: 'Durée', value: duration, inline: true });
-  if (performers.length) {
-    fields.push({ name: performers.length > 1 ? 'Interprètes' : 'Interprète', value: truncate(performers.map(escapeMarkdown).join(', '), 1024) });
-  }
+  const lines = [`**Studio:** ${escapeMarkdown(scene.studio?.name || 'Inconnu')}`];
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(scene.release_date || '') ? scene.release_date : null;
+  if (date) lines.push(`**Date:** ${date}`);
+  const duration = formatShortDuration(scene.duration);
+  if (duration) lines.push(`**Durée:** ${duration}`);
+  if (performers.length) lines.push(`**Performeurs:** ${performers.map(escapeMarkdown).join(', ')}`);
+
   const embed = {
     title: truncate(escapeMarkdown(scene.title || 'Sans titre'), 256),
     color: EMBED_COLOR,
-    fields,
-    footer: { text: truncate(via.length ? `Nouvelle sortie · suivi : ${via.join(', ')}` : 'Nouvelle sortie', 2048) },
+    description: truncate(lines.join('\n'), 4096),
+    footer: { text: truncate(`StashDB — Nouvelle sortie${via.length ? ` · suivi : ${via.join(', ')}` : ''}`, 2048) },
   };
+  if (date) embed.timestamp = new Date(`${date}T00:00:00Z`).toISOString();
   const url = sceneUrl(endpoint, scene.id);
   if (url) embed.url = url;
   const image = safeImage(scene);
   if (image) embed.image = { url: image };
   return embed;
+}
+
+/** Rangée de boutons de l'annonce : « Télécharger image » si la scène en a une. */
+function buildReleaseComponents(scene) {
+  if (!safeImage(scene) || !SCENE_ID_RE.test(String(scene.id))) return [];
+  return [{
+    type: 1,
+    components: [{
+      type: 2, style: 1, label: 'Télécharger image', emoji: { name: '🖼️' },
+      custom_id: `${IMAGE_BUTTON_PREFIX}${scene.id}`,
+    }],
+  }];
+}
+
+/** Id de scène porté par le bouton, ou null si le bouton n'est pas le nôtre / est invalide. */
+function parseImageButton(customId) {
+  const s = String(customId || '');
+  if (!s.startsWith(IMAGE_BUTTON_PREFIX)) return null;
+  const id = s.slice(IMAGE_BUTTON_PREFIX.length);
+  return SCENE_ID_RE.test(id) ? id : null;
+}
+
+/** Nom du fichier image : « Studio - 2026-11-16 - Titre.jpg », sans caractère interdit. */
+function imageFileName(scene, contentType = '') {
+  const ext = /png/i.test(contentType) ? 'png' : /webp/i.test(contentType) ? 'webp' : 'jpg';
+  const base = [scene.studio?.name || 'Inconnu', scene.release_date, scene.title || 'Sans titre']
+    .filter(Boolean).join(' - ')
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim().slice(0, 150);
+  return `${base || 'image'}.${ext}`;
 }
 
 module.exports = {
@@ -160,4 +206,9 @@ module.exports = {
   formatDate,
   sceneUrl,
   buildReleaseEmbed,
+  buildReleaseComponents,
+  parseImageButton,
+  imageFileName,
+  formatShortDuration,
+  safeImage,
 };
