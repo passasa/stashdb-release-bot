@@ -83,6 +83,7 @@ describe('règles des sorties', () => {
     expect(releases.buildReleaseComponents({ ...withImage, id: '../../x' })).toEqual([]);
     // Aucun bouton de demande.
     expect(JSON.stringify(releases.buildReleaseComponents(withImage))).not.toMatch(/demand/i);
+    expect(row.components[0].emoji).toBeUndefined(); // pas de logo sur le bouton
   });
 
   it('clic sur le bouton : identifiant vérifié, nom de fichier sans caractère interdit', () => {
@@ -91,7 +92,12 @@ describe('règles des sorties', () => {
     expect(releases.parseImageButton('request:0b1c2d3e')).toBeNull();
     expect(releases.parseImageButton(undefined)).toBeNull();
     expect(releases.imageFileName({ studio: { name: 'A/B' }, release_date: '2026-11-16', title: 'x:y?' }, 'image/png'))
-      .toBe('A_B - 2026-11-16 - x_y_.png');
+      .toBe('AB - 2026-11-16 - xy.png');
+    expect(releases.imageFileName({ studio: { name: 'Brazzers' }, release_date: '2026-11-16', title: 'Mom: "Part 2"? <Final>' }, 'image/jpeg'))
+      .toBe('Brazzers - 2026-11-16 - Mom Part 2 Final.jpg');
+    expect(releases.imageFileName({ studio: { name: 'Été & Cie' }, title: 'Déjà vu…' })).toBe('Été & Cie - Déjà vu….jpg');
+    expect(releases.imageFileName({ studio: { name: '???' }, title: '***' })).toBe('image.jpg');
+    expect(releases.imageFileName({ title: 'x' })).not.toMatch(/_/);
     expect(releases.imageFileName({}, 'image/jpeg')).toBe('Inconnu - Sans titre.jpg');
   });
 

@@ -165,7 +165,7 @@ function buildReleaseComponents(scene) {
   return [{
     type: 1,
     components: [{
-      type: 2, style: 1, label: 'Télécharger image', emoji: { name: '🖼️' },
+      type: 2, style: 1, label: 'Télécharger image',
       custom_id: `${IMAGE_BUTTON_PREFIX}${scene.id}`,
     }],
   }];
@@ -179,12 +179,17 @@ function parseImageButton(customId) {
   return SCENE_ID_RE.test(id) ? id : null;
 }
 
-/** Nom du fichier image : « Studio - 2026-11-16 - Titre.jpg », sans caractère interdit. */
+/**
+ * Nom du fichier image : « Studio - 2026-11-16 - Titre.jpg ». Les caractères
+ * interdits dans un nom de fichier sont supprimés (pas remplacés), puis les
+ * espaces en trop resserrés : « Mom: Part 2? » → « Mom Part 2 ».
+ */
 function imageFileName(scene, contentType = '') {
   const ext = /png/i.test(contentType) ? 'png' : /webp/i.test(contentType) ? 'webp' : 'jpg';
   const base = [scene.studio?.name || 'Inconnu', scene.release_date, scene.title || 'Sans titre']
+    .filter((part) => part != null && part !== '').map((part) => String(part).replace(/[<>:"/\\|?*\x00-\x1f]/g, '').replace(/\s+/g, ' ').trim())
     .filter(Boolean).join(' - ')
-    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim().slice(0, 150);
+    .replace(/[. ]+$/, '').slice(0, 150).trim();
   return `${base || 'image'}.${ext}`;
 }
 

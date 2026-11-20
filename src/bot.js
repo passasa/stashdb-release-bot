@@ -216,7 +216,7 @@ async function handleImageButton(interaction, sceneId) {
     const { buffer, type } = await downloadImage(url);
     const name = imageFileName(scene, type);
     return interaction.editReply({
-      content: `🖼️ **${escapeMarkdown(name)}**`,
+      content: `**${escapeMarkdown(name)}**`,
       files: [{ attachment: buffer, name }],
       allowedMentions: { parse: [] },
     });

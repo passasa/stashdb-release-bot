@@ -1,6 +1,6 @@
 {
   "name": "stashdb-release-bot",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "private": true,
   "description": "Bot Discord qui annonce les nouvelles sorties des studios suivis sur StashDB",
   "main": "src/bot.js",

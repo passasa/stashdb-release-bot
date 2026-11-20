@@ -16,7 +16,7 @@ Durée: 34m
 Performeurs: Interprète A, Interprète B
 [ image de la scène ]
 StashDB — Nouvelle sortie · suivi : Nom du studio • 16/11/2026
-[ 🖼️ Télécharger image ]
+[ Télécharger image ]
 ```
 
 Le bouton **Télécharger image** renvoie l'image en pièce jointe, visible
